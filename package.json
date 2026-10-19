@@ -1,0 +1,16 @@
+{
+  "name": "cloudconvert",
+  "version": "1.0.0",
+  "description": "Cloud-based file conversion platform like iLovePDF",
+  "scripts": {
+    "install:all": "cd client && npm install && cd ../server && npm install",
+    "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm start\"",
+    "build": "cd client && npm install && npm run build",
+    "build:server": "cd server && npm install",
+    "start": "cd server && node server.js",
+    "render-build": "cd client && npm install && npm run build && cd ../server && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}

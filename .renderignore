@@ -1,0 +1,16 @@
+node_modules
+.git
+.github
+*.md
+docker/
+scripts/
+nginx/
+client/node_modules
+server/node_modules
+server/uploads/*
+server/outputs/*
+server/logs/*
+.env
+.env.local
+*.pem
+*.key
