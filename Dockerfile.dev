@@ -1,0 +1,24 @@
+# Development Dockerfile for the Backend Server
+FROM node:18-alpine
+
+WORKDIR /app/server
+
+# Install all dependencies (including devDependencies like nodemon)
+COPY server/package.json server/package-lock.json* ./
+RUN npm install
+
+# Copy server source code
+COPY server/ ./
+
+# Create required directories
+RUN mkdir -p uploads outputs logs
+
+# Set environment variables
+ENV NODE_ENV=development
+ENV PORT=5000
+
+# Expose port
+EXPOSE 5000
+
+# Start with nodemon for auto-restart
+CMD ["npm", "run", "dev"]
