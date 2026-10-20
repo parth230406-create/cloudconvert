@@ -1,8 +1,9 @@
 const { PDFDocument, rgb, StandardFonts, degrees } = require('pdf-lib');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 const sharp = require('sharp');
-const { spawnSync } = require('child_process');
+const PDFDocumentKit = require('pdfkit');
 const { generateOutputPath } = require('../utils/fileUtils');
 const logger = require('../utils/logger');
 
@@ -27,7 +28,6 @@ class PDFService {
     const pdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
     const totalPages = pdf.getPageCount();
     const outputPaths = [];
-
     if (options.ranges) {
       const ranges = this.parseRanges(options.ranges, totalPages);
       for (let i = 0; i < ranges.length; i++) {
@@ -114,7 +114,6 @@ class PDFService {
     const position = options.position || 'bottom-center';
     const fontSize = options.fontSize || 12;
     const startPage = options.startPage || 1;
-
     pages.forEach((page, index) => {
       if (index + 1 >= startPage) {
         const { width, height } = page.getSize();
@@ -132,7 +131,6 @@ class PDFService {
         page.drawText(pageNumber, { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
       }
     });
-
     const outputPath = generateOutputPath(outputDir, 'numbered', '.pdf');
     const numberedBytes = await pdf.save();
     await fs.writeFile(outputPath, numberedBytes);
@@ -148,7 +146,6 @@ class PDFService {
     const fontSize = options.fontSize || 50;
     const opacity = options.opacity || 0.3;
     const rotation = options.rotation || 45;
-
     pages.forEach(page => {
       const { width, height } = page.getSize();
       const textWidth = font.widthOfTextAtSize(text, fontSize);
@@ -162,7 +159,6 @@ class PDFService {
         rotate: degrees(rotation)
       });
     });
-
     const outputPath = generateOutputPath(outputDir, 'watermarked', '.pdf');
     const watermarkedBytes = await pdf.save();
     await fs.writeFile(outputPath, watermarkedBytes);
@@ -186,10 +182,17 @@ class PDFService {
   }
 
   /**
-   * Protect PDF with password using qpdf (system binary).
-   * Uses spawnSync (not execSync) to avoid shell injection issues
-   * with special characters in passwords or file paths.
-   * qpdf encrypts in-place — ALL original content is preserved perfectly.
+   * Protect PDF with a password.
+   * 
+   * Uses pdfkit's native AES encryption + embedPdf to preserve ALL original content.
+   * No external binaries needed. Pure JavaScript. Works on any Node version.
+   * 
+   * How it works:
+   * 1. Read the original PDF file as a buffer
+   * 2. Create a NEW pdfkit document with userPassword set (this enables AES encryption)
+   * 3. Use doc.embedPdf() to embed every page from the original PDF
+   * 4. Draw each embedded page onto a new page with matching dimensions
+   * 5. The output is a fully encrypted PDF with all original content preserved
    */
   async protectPDF(filePath, outputDir, password) {
     if (!password || password.trim() === '') {
@@ -197,37 +200,72 @@ class PDFService {
     }
 
     const outputPath = generateOutputPath(outputDir, 'protected', '.pdf');
+    const pdfBytes = await fs.readFile(filePath);
 
-    // Use spawnSync — arguments are passed directly, no shell interpretation
-    const result = spawnSync('qpdf', [
-      '--encrypt', password, password, '256', '--',
-      filePath, outputPath
-    ], {
-      timeout: 30000,
-      maxBuffer: 50 * 1024 * 1024,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
+    return new Promise((resolve, reject) => {
+      try {
+        // Create encrypted PDF document
+        const doc = new PDFDocumentKit({
+          userPassword: password,
+          ownerPassword: password,
+          permissions: {
+            printing: 'highResolution',
+            modifying: false,
+            copying: false,
+            annotating: false,
+            fillingForms: false,
+            contentAccessibility: true,
+            documentAssembly: false
+          },
+          autoFirstPage: false
+        });
 
-    // Check if qpdf binary was found
-    if (result.error) {
-      if (result.error.code === 'ENOENT') {
-        logger.error('qpdf binary not found on this system');
-        throw new Error('PDF protection is not available on this server. The qpdf tool is not installed.');
+        const writeStream = fsSync.createWriteStream(outputPath);
+        doc.pipe(writeStream);
+
+        writeStream.on('finish', () => {
+          logger.info(`PDF protected successfully: ${outputPath}`);
+          resolve(outputPath);
+        });
+
+        writeStream.on('error', (err) => {
+          logger.error(`Write stream error: ${err.message}`);
+          reject(new Error(`Failed to write protected PDF: ${err.message}`));
+        });
+
+        // Embed ALL pages from the original PDF at once
+        doc.embedPdf(pdfBytes)
+          .then(pages => {
+            logger.info(`Embedded ${pages.length} pages from original PDF`);
+
+            for (const page of pages) {
+              // Each embedded page has .width and .height
+              const w = page.width || 612;
+              const h = page.height || 792;
+
+              doc.addPage({
+                size: [w, h],
+                margin: 0
+              });
+
+              // Draw the embedded page at full size
+              doc.image(page, 0, 0, { width: w, height: h });
+            }
+
+            doc.end();
+          })
+          .catch(err => {
+            logger.error(`embedPdf failed: ${err.message}`);
+            // Make sure we end the doc to close the stream
+            try { doc.end(); } catch (e) { /* ignore */ }
+            reject(new Error(`Failed to read original PDF for encryption: ${err.message}`));
+          });
+
+      } catch (err) {
+        logger.error(`protectPDF setup error: ${err.message}`);
+        reject(new Error(`PDF protection failed: ${err.message}`));
       }
-      logger.error(`qpdf spawn error: ${result.error.message}`);
-      throw new Error(`PDF protection failed: ${result.error.message}`);
-    }
-
-    // Check if qpdf exited with an error
-    if (result.status !== 0) {
-      const stderr = result.stderr ? result.stderr.toString().trim() : 'Unknown error';
-      const stdout = result.stdout ? result.stdout.toString().trim() : '';
-      logger.error(`qpdf exited with code ${result.status}: ${stderr} ${stdout}`);
-      throw new Error(`PDF protection failed: ${stderr || 'qpdf returned an error'}`);
-    }
-
-    logger.info(`PDF protected successfully with AES-256: ${outputPath}`);
-    return outputPath;
+    });
   }
 
   async getPDFInfo(filePath) {

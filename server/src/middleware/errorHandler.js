@@ -21,11 +21,10 @@ const errorHandler = (err, req, res, next) => {
     });
   }
 
+  // Show real error messages (not hidden) so the frontend can display them
   res.status(err.status || 500).json({
     success: false,
-    error: process.env.NODE_ENV === 'production'
-      ? 'An unexpected error occurred'
-      : err.message
+    error: err.message || 'An unexpected error occurred'
   });
 };
 
