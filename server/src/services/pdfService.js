@@ -1,9 +1,8 @@
 const { PDFDocument, rgb, StandardFonts, degrees } = require('pdf-lib');
 const fs = require('fs').promises;
-const fsSync = require('fs');
 const path = require('path');
 const sharp = require('sharp');
-const PDFDocumentKit = require('pdfkit');
+const { spawnSync } = require('child_process');
 const { generateOutputPath } = require('../utils/fileUtils');
 const logger = require('../utils/logger');
 
@@ -91,13 +90,11 @@ class PDFService {
       const pageHeight = options.pageHeight || image.height;
       const page = pdfDoc.addPage([pageWidth, pageHeight]);
       const scale = Math.min(pageWidth / image.width, pageHeight / image.height);
-      const scaledWidth = image.width * scale;
-      const scaledHeight = image.height * scale;
       page.drawImage(image, {
-        x: (pageWidth - scaledWidth) / 2,
-        y: (pageHeight - scaledHeight) / 2,
-        width: scaledWidth,
-        height: scaledHeight
+        x: (pageWidth - image.width * scale) / 2,
+        y: (pageHeight - image.height * scale) / 2,
+        width: image.width * scale,
+        height: image.height * scale
       });
     }
     const outputPath = generateOutputPath(outputDir, 'images_combined', '.pdf');
@@ -181,91 +178,36 @@ class PDFService {
     return outputPath;
   }
 
-  /**
-   * Protect PDF with a password.
-   * 
-   * Uses pdfkit's native AES encryption + embedPdf to preserve ALL original content.
-   * No external binaries needed. Pure JavaScript. Works on any Node version.
-   * 
-   * How it works:
-   * 1. Read the original PDF file as a buffer
-   * 2. Create a NEW pdfkit document with userPassword set (this enables AES encryption)
-   * 3. Use doc.embedPdf() to embed every page from the original PDF
-   * 4. Draw each embedded page onto a new page with matching dimensions
-   * 5. The output is a fully encrypted PDF with all original content preserved
-   */
   async protectPDF(filePath, outputDir, password) {
     if (!password || password.trim() === '') {
       throw new Error('Password is required to protect a PDF');
     }
 
     const outputPath = generateOutputPath(outputDir, 'protected', '.pdf');
-    const pdfBytes = await fs.readFile(filePath);
 
-    return new Promise((resolve, reject) => {
-      try {
-        // Create encrypted PDF document
-        const doc = new PDFDocumentKit({
-          userPassword: password,
-          ownerPassword: password,
-          permissions: {
-            printing: 'highResolution',
-            modifying: false,
-            copying: false,
-            annotating: false,
-            fillingForms: false,
-            contentAccessibility: true,
-            documentAssembly: false
-          },
-          autoFirstPage: false
-        });
-
-        const writeStream = fsSync.createWriteStream(outputPath);
-        doc.pipe(writeStream);
-
-        writeStream.on('finish', () => {
-          logger.info(`PDF protected successfully: ${outputPath}`);
-          resolve(outputPath);
-        });
-
-        writeStream.on('error', (err) => {
-          logger.error(`Write stream error: ${err.message}`);
-          reject(new Error(`Failed to write protected PDF: ${err.message}`));
-        });
-
-        // Embed ALL pages from the original PDF at once
-        doc.embedPdf(pdfBytes)
-          .then(pages => {
-            logger.info(`Embedded ${pages.length} pages from original PDF`);
-
-            for (const page of pages) {
-              // Each embedded page has .width and .height
-              const w = page.width || 612;
-              const h = page.height || 792;
-
-              doc.addPage({
-                size: [w, h],
-                margin: 0
-              });
-
-              // Draw the embedded page at full size
-              doc.image(page, 0, 0, { width: w, height: h });
-            }
-
-            doc.end();
-          })
-          .catch(err => {
-            logger.error(`embedPdf failed: ${err.message}`);
-            // Make sure we end the doc to close the stream
-            try { doc.end(); } catch (e) { /* ignore */ }
-            reject(new Error(`Failed to read original PDF for encryption: ${err.message}`));
-          });
-
-      } catch (err) {
-        logger.error(`protectPDF setup error: ${err.message}`);
-        reject(new Error(`PDF protection failed: ${err.message}`));
-      }
+    const result = spawnSync('qpdf', [
+      '--encrypt', password, password, '256', '--',
+      filePath, outputPath
+    ], {
+      timeout: 30000,
+      maxBuffer: 50 * 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe']
     });
+
+    if (result.error) {
+      if (result.error.code === 'ENOENT') {
+        throw new Error('PDF protection tool (qpdf) is not installed. Check Render start command logs.');
+      }
+      throw new Error('PDF protection failed: ' + result.error.message);
+    }
+
+    if (result.status !== 0) {
+      const stderr = result.stderr ? result.stderr.toString().trim() : 'unknown error';
+      throw new Error('PDF protection failed: ' + stderr);
+    }
+
+    logger.info('PDF protected successfully: ' + outputPath);
+    return outputPath;
   }
 
   async getPDFInfo(filePath) {
@@ -304,15 +246,11 @@ class PDFService {
       if (part.includes('-')) {
         const [start, end] = part.split('-').map(Number);
         const pages = [];
-        for (let i = Math.max(1, start); i <= Math.min(totalPages, end); i++) {
-          pages.push(i);
-        }
+        for (let i = Math.max(1, start); i <= Math.min(totalPages, end); i++) pages.push(i);
         ranges.push(pages);
       } else {
         const page = parseInt(part);
-        if (page >= 1 && page <= totalPages) {
-          ranges.push([page]);
-        }
+        if (page >= 1 && page <= totalPages) ranges.push([page]);
       }
     });
     return ranges;
