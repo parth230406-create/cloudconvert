@@ -3,7 +3,16 @@ const fs = require('fs').promises;
 const path = require('path');
 const sharp = require('sharp');
 const { generateOutputPath } = require('../utils/fileUtils');
-const logger = require('../utils/logger');
+const logger = require('./../utils/logger');
+
+// Try to load muhammara for real PDF encryption. Fail gracefully if unavailable.
+let muhammara = null;
+try {
+  muhammara = require('muhammara');
+  logger.info('muhammara loaded — PDF password protection enabled');
+} catch (err) {
+  logger.warn('muhammara not available — PDF password protection will throw a clear error');
+}
 
 class PDFService {
 
@@ -60,7 +69,7 @@ class PDFService {
     return outputPaths;
   }
 
-  async compressPDF(filePath, outputDir, quality = 'medium') {
+  async compressPDF(filePath, outputDir) {
     const pdfBytes = await fs.readFile(filePath);
     const pdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
 
@@ -228,17 +237,34 @@ class PDFService {
     return outputPath;
   }
 
+  /**
+   * REAL password protection using muhammara (prebuilt binaries, works on Render).
+   * Falls back to throwing a clear error if the library is not installed.
+   */
   async protectPDF(filePath, outputDir, password) {
-    const pdfBytes = await fs.readFile(filePath);
-    const pdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+    if (!password || password.trim() === '') {
+      throw new Error('Password is required to protect a PDF');
+    }
 
-    pdf.setTitle('Protected Document');
+    if (!muhammara) {
+      throw new Error('PDF password protection is unavailable on this server. Please contact the administrator to install the "muhammara" package.');
+    }
 
     const outputPath = generateOutputPath(outputDir, 'protected', '.pdf');
-    const protectedBytes = await pdf.save();
-    await fs.writeFile(outputPath, protectedBytes);
 
-    return outputPath;
+    try {
+      muhammara.recrypt(filePath, outputPath, {
+        userPassword: password,
+        ownerPassword: password,
+        userProtectionFlag: 4
+      });
+
+      logger.info(`PDF protected successfully: ${outputPath}`);
+      return outputPath;
+    } catch (err) {
+      logger.error(`muhammara.recrypt failed: ${err.message}`);
+      throw new Error('Failed to apply password protection to PDF. The source file may be corrupted or already encrypted.');
+    }
   }
 
   async getPDFInfo(filePath) {
